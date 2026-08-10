@@ -8,7 +8,6 @@ description: >-
   release command. Pass per-repo secrets/vars via the `env` JSON input and/or
   step-level `env:` on the caller.
 author: sullivanpj
-
 branding:
   icon: package
   color: gray-dark
@@ -61,10 +60,10 @@ runs:
   steps:
     - name: Derive appropriate SHAs for base and head for `nx affected` commands
       id: setSHAs
-      uses: nrwl/nx-set-shas@3e9ad7370203c1e93d109be57f3b72eb0eb511b1 # v4.4.0
+      uses: storm-software/action-set-release-sha@main
       with:
-        main-branch-name: ${{ inputs.main-branch-name }}
-        workflow-id: ${{ inputs.workflow-id }}
+        # main-branch-name: ${{ inputs.main-branch-name }}
+        # workflow-id: ${{ inputs.workflow-id }}
         set-environment-variables-for-job: true
         error-on-no-successful-workflow: ${{ inputs.error-on-no-successful-workflow }}
 
