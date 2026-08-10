@@ -1,0 +1,125 @@
+# Note: This is a composite GitHub Actions, it should do all env setup, caching an so on,
+# so other pipelines can just compose their own stuff on top of that.
+# Docs: https://docs.github.com/en/actions/creating-actions/creating-a-composite-action
+
+name: Storm Software - Release
+description: >-
+  Derive Nx affected SHAs, warm up the devenv shell, and run the repository
+  release command. Pass per-repo secrets/vars via the `env` JSON input and/or
+  step-level `env:` on the caller.
+author: sullivanpj
+
+branding:
+  icon: package
+  color: gray-dark
+
+inputs:
+  workflow-id:
+    description: Workflow file name used by nx-set-shas to find the last successful run
+    required: false
+    default: release.yml
+  main-branch-name:
+    description: Main branch name used as the Nx affected base target
+    required: false
+    default: main
+  error-on-no-successful-workflow:
+    description: >-
+      If true, fail when no successful workflow is found for SHA derivation.
+      If false, warn and fall back (nx-set-shas default behavior).
+    required: false
+    default: "false"
+  devenv-profile:
+    description: Devenv profile passed to `devenv --profile`
+    required: false
+    default: production
+  tag:
+    description: Optional release tag override (exported as TAG)
+    required: false
+    default: ""
+  release-args:
+    description: Optional extra arguments appended after base and head SHAs
+    required: false
+    default: ""
+  env:
+    description: >-
+      JSON object of environment variables applied only to the release step
+      (e.g. NPM_TOKEN, STORM_BOT_GITHUB_TOKEN). Caller step-level `env:` is also
+      inherited by all composite steps.
+    required: false
+    default: "{}"
+
+outputs:
+  base:
+    description: Base SHA for nx affected / release
+    value: ${{ steps.setSHAs.outputs.base }}
+  head:
+    description: Head SHA for nx affected / release
+    value: ${{ steps.setSHAs.outputs.head }}
+
+runs:
+  using: composite
+  steps:
+    - name: Derive appropriate SHAs for base and head for `nx affected` commands
+      id: setSHAs
+      uses: nrwl/nx-set-shas@3e9ad7370203c1e93d109be57f3b72eb0eb511b1 # v4.4.0
+      with:
+        main-branch-name: ${{ inputs.main-branch-name }}
+        workflow-id: ${{ inputs.workflow-id }}
+        set-environment-variables-for-job: true
+        error-on-no-successful-workflow: ${{ inputs.error-on-no-successful-workflow }}
+
+    # On a fresh runner store, devenv evaluation intermittently fails with
+    # "path '... is not valid" (upstream: https://github.com/cachix/devenv/issues/3064).
+    # Warm up with retries so the publish step stays single-shot.
+    - name: Warm up devenv shell (retry store-path flake)
+      shell: bash
+      env:
+        DEVENV_PROFILE: ${{ inputs.devenv-profile }}
+      run: |
+        for i in 1 2 3; do
+          out=$(devenv --profile "$DEVENV_PROFILE" --no-tui shell -- true 2>&1) && {
+            printf '%s\n' "$out"
+            exit 0
+          }
+          echo "attempt $i failed"
+          printf '%s\n' "$out" | tail -40
+          bad=$(printf '%s\n' "$out" \
+            | grep -oE "/nix/store/[a-z0-9]{32}-[^']*' is not valid" \
+            | sed "s/' is not valid//" | head -1)
+          if [ -n "$bad" ]; then
+            echo "removing invalid store path: $bad"
+            sudo rm -rf "$bad" || true
+          else
+            # Non-flake failure: surface and stop
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "devenv shell warm-up failed after 3 attempts"
+        exit 1
+
+    - name: Release repository updates
+      shell: bash
+      env:
+        NX_BASE: ${{ steps.setSHAs.outputs.base }}
+        NX_HEAD: ${{ steps.setSHAs.outputs.head }}
+        TAG: ${{ inputs.tag }}
+        DEVENV_PROFILE: ${{ inputs.devenv-profile }}
+        RELEASE_ARGS: ${{ inputs.release-args }}
+        EXTRA_ENV_JSON: ${{ inputs.env }}
+      run: |
+        if [ -n "$EXTRA_ENV_JSON" ] && [ "$EXTRA_ENV_JSON" != "{}" ]; then
+          if ! echo "$EXTRA_ENV_JSON" | jq empty 2>/dev/null; then
+            echo "ERROR: Invalid JSON in env input" >&2
+            exit 1
+          fi
+          eval "$(
+            echo "$EXTRA_ENV_JSON" | jq -r '
+              to_entries[] | "export \(.key|@sh)=\(.value|tostring|@sh)"
+            '
+          )"
+        fi
+        # Intentionally unquoted RELEASE_ARGS to allow multiple extra args
+        # shellcheck disable=SC2086
+        devenv --profile "$DEVENV_PROFILE" --no-tui shell release \
+          "$NX_BASE" "$NX_HEAD" $RELEASE_ARGS
